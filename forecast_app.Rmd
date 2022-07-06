@@ -1,0 +1,266 @@
+---
+title: "Sales Forecaster"
+output:
+    flexdashboard::flex_dashboard:
+        orientation: rows
+        theme:
+            bg: "#FFFFFF"
+            fg: "#424242"
+            primary: "#1F77B4"
+            navbar-bg: "#aec7e8"
+            base_font: !expr bslib::font_google("Roboto")
+runtime: shiny
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo    = FALSE,
+    message = FALSE,
+    warning = FALSE
+)
+
+library(shiny)
+library(shinyjs)
+library(plotly)
+library(reactable)
+library(bslib)
+
+library(modeltime)
+library(tidymodels)
+
+library(tidyverse)
+library(timetk)
+library(ggthemes)
+
+```
+
+
+```{r}
+
+best_models_tbl <- read_rds("~/R/MIS480_Portfolio/artifacts/best_models_tbl.rds")
+
+sorted_items_tbl <- best_models_tbl %>% 
+    select(item_id) %>%
+    mutate(item_id = as.character(item_id)) %>%
+    arrange(item_id) 
+
+#indicator_options <- best_models_tbl$item_id
+
+indicator_options <- sorted_items_tbl$item_id
+
+default_options <- indicator_options[c(20, 30, 59)]
+```
+
+
+
+# 
+
+## Column {.sidebar}
+
+#### Objective
+
+Predict future sales of products based on past sales data.
+
+<hr>
+
+#### Product IDs
+
+```{r}
+# Shiny JS for interactivity
+useShinyjs(rmd = TRUE)
+
+# Select products input    
+shiny::selectInput(
+    inputId   = "products",
+    label     = "Choose products to forecast:",
+    choices   = indicator_options,
+    selected  = default_options,
+    selectize = TRUE, 
+    multiple  = TRUE
+)
+
+# Select forecasting horizon
+numericInput(
+    inputId = "forecast_horizon", 
+    label   = "Forecast Horizon (N)", 
+    value   = 90, 
+    min     = 2
+)
+
+shiny::sliderInput(
+    inputId = "conf_interval",
+    label   = "Prediction Interval",
+    min     = 0, 
+    max     = 1, 
+    value   = 0.95
+)
+    
+actionButton(inputId = "apply", label = "Apply", icon = icon("play"))
+
+actionButton(inputId = "reset", label = "Reset", icon = icon("sync"))
+
+
+observeEvent(eventExpr = input$reset, handlerExpr = {
+  
+    updateSelectInput(
+        session  = session, 
+        inputId  = "products",
+        selected = default_options
+    )
+    
+    updateNumericInput(
+        inputId = "forecast_horizon", 
+        value   = 90
+    )
+    
+    updateSliderInput(
+        session = session, 
+        inputId = "conf_interval",
+        value   = 0.95
+    )
+    
+  shinyjs::delay(ms = 300, expr = {
+      shinyjs::click(id = "apply")
+  })
+ 
+  
+})
+
+
+```
+
+<hr>
+
+```{r}
+# LOGIC
+
+rv <- reactiveValues()
+
+observeEvent(input$apply, {
+    
+    rv$model_tbl <- best_models_tbl %>% filter(item_id %in% input$products)
+    
+    rv$forecast_tbl <- rv$model_tbl %>%
+        modeltime_nested_forecast(
+            h = input$forecast_horizon,
+            conf_interval = input$conf_interval,
+            control = control_nested_forecast(
+                verbose   = TRUE,
+                allow_par = FALSE
+            )
+        )
+    
+    
+}, ignoreNULL = FALSE)
+```
+
+
+## Row {.tabset .tabset-fade}
+
+### Predicted Forecast 
+
+```{r}
+output$plotly_1 <- renderPlotly({
+    
+    facet_col <- 1
+    
+    if (length(input$products) > 3) facet_col <- 2
+    
+    if (length(input$products) > 8) facet_col <- 4
+    
+    pred_plot <- rv$forecast_tbl %>%
+        mutate(
+        .model_desc = replace(
+            .model_desc, .model_desc == "TEMPORAL HIERARCHICAL FORECASTING MODEL", "Temporal Hierarchical"),
+        .model_desc = replace(
+            .model_desc, .model_desc == "XGBOOST", "XGBoost"),
+        ) %>%
+        group_by(item_id) %>%
+        plot_modeltime_forecast(
+            .facet_ncol = facet_col, 
+            .legend_max_width = 26, 
+            .interactive = FALSE,
+            .title = "Predicted Sales Forecast"
+        ) + 
+        theme_gdocs() + 
+        scale_color_tableau() + 
+        theme(plot.title = element_text(color = "#616161", face = "bold"),
+          legend.title = element_text(color = "#616161"),
+          legend.text = element_text(color = "#616161"),
+          text = element_text(family = "Roboto"))
+    
+    pred_plot %>% ggplotly(dynamicTicks = TRUE)
+})
+
+plotlyOutput(outputId = "plotly_1")
+```
+
+
+### Model Fit
+
+```{r}
+output$plotly_2 <- renderPlotly({
+    
+    facet_col <- 1
+    
+    if (length(input$products) > 3) facet_col <- 2
+    
+    if (length(input$products) > 8) facet_col <- 4
+    
+    test_plot <- rv$model_tbl %>%
+        extract_nested_test_forecast(.id_subset = input$products) %>%
+        mutate(
+        .model_desc = replace(
+            .model_desc, .model_desc == "TEMPORAL HIERARCHICAL FORECASTING MODEL", "Temporal Hierarchical"),
+        .model_desc = replace(
+            .model_desc, .model_desc == "XGBOOST", "XGBoost"),
+        ) %>%
+        group_by(item_id) %>%
+        plot_modeltime_forecast(
+            .facet_ncol = facet_col, 
+            .legend_max_width = 26, 
+            .interactive = FALSE,
+            .title = "Model Fit on Test Set"
+        ) + 
+        theme_gdocs() + 
+        scale_color_tableau() + 
+        theme(plot.title = element_text(color = "#616161", face = "bold"),
+          legend.title = element_text(color = "#424242"),
+          legend.text = element_text(color = "#616161"),
+          text = element_text(family = "Roboto"))
+    
+    test_plot %>% ggplotly(dynamicTicks = TRUE)
+})
+
+plotlyOutput(outputId = "plotly_2")
+
+```
+
+### Model Accuracy
+
+```{r}
+output$reactable_1 <- renderReactable({
+    rv$model_tbl %>%
+        extract_nested_test_accuracy() %>%
+        filter(item_id %in% input$products) %>%
+        mutate(
+        .model_desc = replace(
+            .model_desc, .model_desc == "TEMPORAL HIERARCHICAL FORECASTING MODEL", "Temporal Hierarchical"),
+        .model_desc = replace(
+            .model_desc, .model_desc == "XGBOOST", "XGBoost"),
+    ) %>%
+        table_modeltime_accuracy(.title = "Model Accuracy on Test Set",
+                                 .interactive = TRUE,
+                                 showPageSizeOptions = TRUE,
+                                 pageSizeOptions = c(9, 18, 27, 36, 45, 54, 63, 72),
+                                 pagination = TRUE,
+                                 highlight = TRUE,
+                                 defaultPageSize = 9,
+                                 onClick = "select",
+                                 theme = reactableTheme(color="#616161",
+                                                        highlightColor = "#aec7e8"))
+})
+
+reactableOutput("reactable_1")
+```
